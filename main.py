@@ -1,69 +1,78 @@
 #!/usr/bin/env python3
 
 import argparse
-import httpx
-import xml.etree.ElementTree as ET
-from variables import ELINK_URL, ESUMMARY_URL
-from sklearn.feature_extraction.text import TfidfVectorizer
+import concurrent.futures
+
+from retrieve_data import get_data_from_txt, get_datasets_id, request_from_database
+from ml import tf_idf_sklearn, similarity, clustering_kmeans, plot_clusters
+from logs import log
 
 
-def get_data_from_txt(file_path: str) -> list[str] | None:
-    try:
-        with open(file_path, "r") as file:
-            return [x.strip() for x in file.readlines()]
-    except FileNotFoundError:
-        print(f"File {file_path} not found")
+def get_arguments() -> argparse.Namespace:
+    """
+    Function for retrieving arguments from user
 
-
-def get_datasets_id(index: str, key : str) -> list[str]:
-    print(index)
-    request_url = f"{ELINK_URL}&id={index}"
-    if key:
-        request_url = request_url + f"&key={key}"
-    response = httpx.get(request_url)
-    xml_root = ET.fromstring(response.text)
-    return [idx.text for idx in xml_root.findall(".//Link/Id")]
-
-
-def request_from_database(dataset: str, pimd: str, key : str = None) -> dict[str, str]:
-    print(dataset)
-    request_url = f"{ESUMMARY_URL}&id={dataset}"
-    if key:
-        request_url = request_url + f"&key={key}"
-    response = httpx.get(request_url)
-    xml_root = ET.fromstring(response.text)
-    d = {
-        'pimd' : pimd,
-        'dataset' : dataset,
-        'title' : xml_root.find(".//Item[@Name='title']").text,
-        'experiment type' : xml_root.find(".//Item[@Name='gdsType']").text,
-        'summary' : xml_root.find(".//Item[@Name='summary']").text,
-        'organism' : xml_root.find(".//Item[@Name='taxon']").text
-        # todo overall design
-    }
-    print(d)
-    return d
-
-def tfidf(data: list[str]):
-    vectorizer = TfidfVectorizer(stop_words="english")
-    tfidf_matrix = vectorizer.fit_transform(data)
-    tfidf_array = tfidf_matrix.toarray()
-    return tfidf_array
-
-
-def main():
+    :return: Parsed arguments
+    """
     parser = argparse.ArgumentParser(description='Program to retrieve information from PubMed')
     parser.add_argument('-f', '--file', required=True, type=str, help='Path to .txt file with PMIDs')
     parser.add_argument('-k', '--key', required=False, type=str, help='Api key for eutils')
-    args = parser.parse_args()
+    return parser.parse_args()
+
+
+def process_pmid(pmid: str, key: str) -> tuple[str, int, list[dict[str, str]]]:
+    """
+    Single process of retrieving information from PubMed
+
+    :param pmid: PIMD index
+    :param key: Api key for faster data retrieval
+    :return:
+    """
+    ids = get_datasets_id(pmid, key)
+    log("Data", ids)
+    retrieved_ids = 0
+    data_list = []
+    for i in ids:
+        data_dict = request_from_database(i, pmid, key)
+        if data_dict:
+            retrieved_ids += 1
+            data_list.append(data_dict)
+    return pmid, retrieved_ids, data_list
+
+
+def main(args: argparse.Namespace) -> None:
+    """
+    Main logic of program
+
+    :param args: Parsed arguments from user
+    :return:
+    """
     pimd = get_data_from_txt(args.file)
-    print("pimd: ", pimd)
+    log("Data", {'PIMD': pimd})
+    results = {}
+
+    with concurrent.futures.ThreadPoolExecutor() as executor:
+        future_to_pmid = {executor.submit(process_pmid, p, args.key): p for p in pimd}
+        for future in concurrent.futures.as_completed(future_to_pmid):
+            pmid, retrieved_ids, data_list = future.result()
+            results[pmid] = (retrieved_ids, data_list)
+
+    pimd_count = {}
+    id_counter = 0
+    text_data = []
     for p in pimd:
-        ids = get_datasets_id(p, args.key)
-        print("ids: ", ids)
-        for i in ids:
-            request_from_database(i, args.key)
+        retrieved_ids, data_list = results.get(p, (0, []))
+        pimd_count[p] = (id_counter, id_counter + retrieved_ids)
+        id_counter += retrieved_ids
+        text_data.extend(data_list)
+
+    matrix = tf_idf_sklearn(text_data)
+    clusters = clustering_kmeans(matrix, len(pimd))
+    log("Data Similarity matrix", similarity(matrix))
+    log("Data Clustering", clusters)
+    log("Data", pimd_count)
+    plot_clusters(matrix, clusters, pimd_count)
 
 
 if __name__ == "__main__":
-    main()
+    main(get_arguments())
