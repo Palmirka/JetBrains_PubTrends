@@ -44,7 +44,7 @@ def get_datasets_id(index: str, key : str) -> list[str]:
         except httpx.HTTPError as e:
             log("Exception", f"{e}")
             return []
-    time.sleep(1)
+        time.sleep(1)
     xml_root = ET.fromstring(response.text)
     data = [idx.text for idx in xml_root.findall(".//Link/Id")]
     return data
